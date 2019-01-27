@@ -1376,13 +1376,13 @@ void handle_constraint_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&sway_constraint->destroy.link);
 
 	if (cursor->active_constraint == constraint) {
+		warp_to_constraint_cursor_hint(cursor);
+
 		if (cursor->constraint_commit.link.next != NULL) {
 			wl_list_remove(&cursor->constraint_commit.link);
 		}
 		wl_list_init(&cursor->constraint_commit.link);
 		cursor->active_constraint = NULL;
-
-		warp_to_constraint_cursor_hint(cursor);
 	}
 
 	free(sway_constraint);
@@ -1416,11 +1416,11 @@ void sway_cursor_constrain(struct sway_cursor *cursor,
 
 	wl_list_remove(&cursor->constraint_commit.link);
 	if (cursor->active_constraint) {
-		wlr_pointer_constraint_v1_send_deactivated(
-			cursor->active_constraint);
 		if (constraint == NULL) {
 			warp_to_constraint_cursor_hint(cursor);
 		}
+		wlr_pointer_constraint_v1_send_deactivated(
+			cursor->active_constraint);
 	}
 
 	cursor->active_constraint = constraint;
