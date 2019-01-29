@@ -92,7 +92,7 @@ void container_begin_destroy(struct sway_container *con) {
 	}
 	// The workspace must have the fullscreen pointer cleared so that the
 	// seat code can find an appropriate new focus.
-	if (con->is_fullscreen && con->workspace) {
+	if (con->fullscreen_mode == FULLSCREEN_WORKSPACE && con->workspace) {
 		con->workspace->fullscreen = NULL;
 	}
 	wl_signal_emit(&con->node.events.destroy, &con->node);
@@ -104,6 +104,10 @@ void container_begin_destroy(struct sway_container *con) {
 
 	if (con->scratchpad) {
 		root_scratchpad_remove_container(con);
+	}
+
+	if (con->fullscreen_mode == FULLSCREEN_GLOBAL) {
+		container_fullscreen_disable(con);
 	}
 
 	if (con->parent || con->workspace) {
@@ -165,8 +169,8 @@ static struct sway_container *surface_at_view(struct sway_container *con, double
 		return NULL;
 	}
 	struct sway_view *view = con->view;
-	double view_sx = lx - con->content_x + view->geometry.x;
-	double view_sy = ly - con->content_y + view->geometry.y;
+	double view_sx = lx - con->surface_x + view->geometry.x;
+	double view_sy = ly - con->surface_y + view->geometry.y;
 
 	double _sx, _sy;
 	struct wlr_surface *_surface = NULL;
@@ -337,7 +341,7 @@ static bool surface_is_popup(struct wlr_surface *surface) {
 	if (wlr_surface_is_xdg_surface(surface)) {
 		struct wlr_xdg_surface *xdg_surface =
 			wlr_xdg_surface_from_wlr_surface(surface);
-		while (xdg_surface) {
+		while (xdg_surface && xdg_surface->role != WLR_XDG_SURFACE_ROLE_NONE) {
 			if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
 				return true;
 			}
@@ -349,7 +353,8 @@ static bool surface_is_popup(struct wlr_surface *surface) {
 	if (wlr_surface_is_xdg_surface_v6(surface)) {
 		struct wlr_xdg_surface_v6 *xdg_surface_v6 =
 			wlr_xdg_surface_v6_from_wlr_surface(surface);
-		while (xdg_surface_v6) {
+		while (xdg_surface_v6 &&
+				xdg_surface_v6->role != WLR_XDG_SURFACE_V6_ROLE_NONE) {
 			if (xdg_surface_v6->role == WLR_XDG_SURFACE_V6_ROLE_POPUP) {
 				return true;
 			}
@@ -840,15 +845,15 @@ void container_floating_move_to_center(struct sway_container *con) {
 		return;
 	}
 	struct sway_workspace *ws = con->workspace;
-	bool full = con->is_fullscreen;
-	if (full) {
-		container_set_fullscreen(con, false);
+	enum sway_fullscreen_mode fullscreen_mode = con->fullscreen_mode;
+	if (fullscreen_mode) {
+		container_fullscreen_disable(con);
 	}
 	double new_lx = ws->x + (ws->width - con->width) / 2;
 	double new_ly = ws->y + (ws->height - con->height) / 2;
 	container_floating_translate(con, new_lx - con->x, new_ly - con->y);
-	if (full) {
-		container_set_fullscreen(con, true);
+	if (fullscreen_mode) {
+		container_set_fullscreen(con, fullscreen_mode);
 	}
 }
 
@@ -877,59 +882,125 @@ static void set_fullscreen_iterator(struct sway_container *con, void *data) {
 	}
 }
 
-void container_set_fullscreen(struct sway_container *container, bool enable) {
-	if (container->is_fullscreen == enable) {
+static void container_fullscreen_workspace(struct sway_container *con) {
+	if (!sway_assert(con->fullscreen_mode == FULLSCREEN_NONE,
+				"Expected a non-fullscreen container")) {
 		return;
 	}
+	bool enable = true;
+	set_fullscreen_iterator(con, &enable);
+	container_for_each_child(con, set_fullscreen_iterator, &enable);
 
-	struct sway_workspace *workspace = container->workspace;
-	if (enable && workspace->fullscreen) {
-		container_set_fullscreen(workspace->fullscreen, false);
+	con->workspace->fullscreen = con;
+	con->saved_x = con->x;
+	con->saved_y = con->y;
+	con->saved_width = con->width;
+	con->saved_height = con->height;
+
+	struct sway_seat *seat;
+	struct sway_workspace *focus_ws;
+	wl_list_for_each(seat, &server.input->seats, link) {
+		focus_ws = seat_get_focused_workspace(seat);
+		if (focus_ws == con->workspace) {
+			seat_set_focus_container(seat, con);
+		}
 	}
 
-	set_fullscreen_iterator(container, &enable);
-	container_for_each_child(container, set_fullscreen_iterator, &enable);
+	con->fullscreen_mode = FULLSCREEN_WORKSPACE;
+	container_end_mouse_operation(con);
+	ipc_event_window(con, "fullscreen_mode");
+}
 
-	container->is_fullscreen = enable;
+static void container_fullscreen_global(struct sway_container *con) {
+	if (!sway_assert(con->fullscreen_mode == FULLSCREEN_NONE,
+				"Expected a non-fullscreen container")) {
+		return;
+	}
+	bool enable = true;
+	set_fullscreen_iterator(con, &enable);
+	container_for_each_child(con, set_fullscreen_iterator, &enable);
 
-	if (enable) {
-		workspace->fullscreen = container;
-		container->saved_x = container->x;
-		container->saved_y = container->y;
-		container->saved_width = container->width;
-		container->saved_height = container->height;
+	root->fullscreen_global = con;
+	con->saved_x = con->x;
+	con->saved_y = con->y;
+	con->saved_width = con->width;
+	con->saved_height = con->height;
 
-		struct sway_seat *seat;
-		struct sway_workspace *focus_ws;
-		wl_list_for_each(seat, &server.input->seats, link) {
-			focus_ws = seat_get_focused_workspace(seat);
-			if (focus_ws) {
-				if (focus_ws == workspace) {
-					seat_set_focus_container(seat, container);
-				}
+	struct sway_seat *seat;
+	wl_list_for_each(seat, &server.input->seats, link) {
+		struct sway_container *focus = seat_get_focused_container(seat);
+		if (focus && focus != con) {
+			seat_set_focus_container(seat, con);
+		}
+	}
+
+	con->fullscreen_mode = FULLSCREEN_GLOBAL;
+	container_end_mouse_operation(con);
+	ipc_event_window(con, "fullscreen_mode");
+}
+
+void container_fullscreen_disable(struct sway_container *con) {
+	if (!sway_assert(con->fullscreen_mode != FULLSCREEN_NONE,
+				"Expected a fullscreen container")) {
+		return;
+	}
+	bool enable = false;
+	set_fullscreen_iterator(con, &enable);
+	container_for_each_child(con, set_fullscreen_iterator, &enable);
+
+	if (container_is_floating(con)) {
+		con->x = con->saved_x;
+		con->y = con->saved_y;
+	}
+	con->width = con->saved_width;
+	con->height = con->saved_height;
+
+	if (con->fullscreen_mode == FULLSCREEN_WORKSPACE) {
+		con->workspace->fullscreen = NULL;
+		if (container_is_floating(con)) {
+			struct sway_output *output = container_floating_find_output(con);
+			if (con->workspace->output != output) {
+				container_floating_move_to_center(con);
 			}
 		}
 	} else {
-		workspace->fullscreen = NULL;
-		if (container_is_floating(container)) {
-			container->x = container->saved_x;
-			container->y = container->saved_y;
-			container->width = container->saved_width;
-			container->height = container->saved_height;
-			struct sway_output *output =
-				container_floating_find_output(container);
-			if (workspace->output != output) {
-				container_floating_move_to_center(container);
-			}
-		} else {
-			container->width = container->saved_width;
-			container->height = container->saved_height;
-		}
+		root->fullscreen_global = NULL;
 	}
 
-	container_end_mouse_operation(container);
+	con->fullscreen_mode = FULLSCREEN_NONE;
+	container_end_mouse_operation(con);
+	ipc_event_window(con, "fullscreen_mode");
+}
 
-	ipc_event_window(container, "fullscreen_mode");
+void container_set_fullscreen(struct sway_container *con,
+		enum sway_fullscreen_mode mode) {
+	if (con->fullscreen_mode == mode) {
+		return;
+	}
+
+	switch (mode) {
+	case FULLSCREEN_NONE:
+		container_fullscreen_disable(con);
+		break;
+	case FULLSCREEN_WORKSPACE:
+		if (root->fullscreen_global) {
+			container_fullscreen_disable(root->fullscreen_global);
+		}
+		if (con->workspace->fullscreen) {
+			container_fullscreen_disable(con->workspace->fullscreen);
+		}
+		container_fullscreen_workspace(con);
+		break;
+	case FULLSCREEN_GLOBAL:
+		if (root->fullscreen_global) {
+			container_fullscreen_disable(root->fullscreen_global);
+		}
+		if (con->fullscreen_mode == FULLSCREEN_WORKSPACE) {
+			container_fullscreen_disable(con);
+		}
+		container_fullscreen_global(con);
+		break;
+	}
 }
 
 bool container_is_floating_or_child(struct sway_container *container) {
@@ -941,7 +1012,7 @@ bool container_is_floating_or_child(struct sway_container *container) {
 
 bool container_is_fullscreen_or_child(struct sway_container *container) {
 	do {
-		if (container->is_fullscreen) {
+		if (container->fullscreen_mode) {
 			return true;
 		}
 		container = container->parent;
@@ -1086,11 +1157,11 @@ enum sway_container_layout container_current_parent_layout(
 	return con->current.workspace->current.layout;
 }
 
-list_t *container_get_siblings(const struct sway_container *container) {
+list_t *container_get_siblings(struct sway_container *container) {
 	if (container->parent) {
 		return container->parent->children;
 	}
-	if (!container->workspace) {
+	if (container_is_scratchpad_hidden(container)) {
 		return NULL;
 	}
 	if (list_find(container->workspace->tiling, container) != -1) {
@@ -1099,7 +1170,7 @@ list_t *container_get_siblings(const struct sway_container *container) {
 	return container->workspace->floating;
 }
 
-int container_sibling_index(const struct sway_container *child) {
+int container_sibling_index(struct sway_container *child) {
 	return list_find(container_get_siblings(child), child);
 }
 
@@ -1111,12 +1182,12 @@ list_t *container_get_current_siblings(struct sway_container *container) {
 }
 
 void container_handle_fullscreen_reparent(struct sway_container *con) {
-	if (!con->is_fullscreen || !con->workspace ||
+	if (con->fullscreen_mode != FULLSCREEN_WORKSPACE || !con->workspace ||
 			con->workspace->fullscreen == con) {
 		return;
 	}
 	if (con->workspace->fullscreen) {
-		container_set_fullscreen(con->workspace->fullscreen, false);
+		container_fullscreen_disable(con->workspace->fullscreen);
 	}
 	con->workspace->fullscreen = con;
 
@@ -1171,8 +1242,11 @@ void container_add_child(struct sway_container *parent,
 }
 
 void container_detach(struct sway_container *child) {
-	if (child->is_fullscreen) {
+	if (child->fullscreen_mode == FULLSCREEN_WORKSPACE) {
 		child->workspace->fullscreen = NULL;
+	}
+	if (child->fullscreen_mode == FULLSCREEN_GLOBAL) {
+		root->fullscreen_global = NULL;
 	}
 
 	struct sway_container *old_parent = child->parent;
@@ -1388,3 +1462,6 @@ void container_raise_floating(struct sway_container *con) {
 	}
 }
 
+bool container_is_scratchpad_hidden(struct sway_container *con) {
+	return con->scratchpad && !con->workspace;
+}

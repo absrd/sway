@@ -216,7 +216,7 @@ static bool is_transient_for(struct sway_view *child,
 		return false;
 	}
 	struct wlr_xdg_surface *surface = child->wlr_xdg_surface;
-	while (surface) {
+	while (surface && surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
 		if (surface->toplevel->parent == ancestor->wlr_xdg_surface) {
 			return true;
 		}
@@ -291,10 +291,9 @@ static void handle_commit(struct wl_listener *listener, void *data) {
 		wlr_xdg_surface_get_geometry(xdg_surface, &new_geo);
 		struct sway_container *con = view->container;
 
-		if ((new_geo.width != con->content_width ||
-					new_geo.height != con->content_height) &&
-				container_is_floating(con)) {
-			// A floating view has unexpectedly sent a new size
+		if ((new_geo.width != con->surface_width ||
+					new_geo.height != con->surface_height)) {
+			// The view has unexpectedly sent a new size
 			desktop_damage_view(view);
 			view_update_size(view, new_geo.width, new_geo.height);
 			memcpy(&view->geometry, &new_geo, sizeof(struct wlr_box));
@@ -349,7 +348,7 @@ static void handle_request_fullscreen(struct wl_listener *listener, void *data) 
 
 	container_set_fullscreen(view->container, e->fullscreen);
 
-	arrange_workspace(view->container->workspace);
+	arrange_root();
 	transaction_commit_dirty();
 }
 

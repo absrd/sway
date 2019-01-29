@@ -282,7 +282,7 @@ static json_object *ipc_json_describe_scratchpad_output(void) {
 	json_object *floating_array = json_object_new_array();
 	for (int i = 0; i < root->scratchpad->length; ++i) {
 		struct sway_container *container = root->scratchpad->items[i];
-		if (!container->workspace) {
+		if (container_is_scratchpad_hidden(container)) {
 			json_object_array_add(floating_array,
 				ipc_json_describe_node_recursive(&container->node));
 		}
@@ -425,7 +425,9 @@ static void ipc_json_describe_container(struct sway_container *c, json_object *o
 		view_is_urgent(c->view) : container_has_urgent_child(c);
 	json_object_object_add(object, "urgent", json_object_new_boolean(urgent));
 	json_object_object_add(object, "sticky", json_object_new_boolean(c->is_sticky));
-	json_object_object_add(object, "fullscreen_mode", json_object_new_int(c->is_fullscreen));
+
+	json_object_object_add(object, "fullscreen_mode",
+			json_object_new_int(c->fullscreen_mode));
 
 	struct sway_node *parent = node_get_parent(&c->node);
 	struct wlr_box parent_box = {0, 0, 0, 0};

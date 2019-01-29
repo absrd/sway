@@ -101,7 +101,10 @@ void root_scratchpad_show(struct sway_container *con) {
 	// If the current con or any of its parents are in fullscreen mode, we
 	// first need to disable it before showing the scratchpad con.
 	if (new_ws->fullscreen) {
-		container_set_fullscreen(new_ws->fullscreen, false);
+		container_fullscreen_disable(new_ws->fullscreen);
+	}
+	if (root->fullscreen_global) {
+		container_fullscreen_disable(root->fullscreen_global);
 	}
 
 	// Show the container
@@ -307,10 +310,7 @@ void root_for_each_container(void (*f)(struct sway_container *con, void *data),
 	// Scratchpad
 	for (int i = 0; i < root->scratchpad->length; ++i) {
 		struct sway_container *container = root->scratchpad->items[i];
-		// If the container has a workspace then it's visible on a workspace
-		// and will have been iterated in the previous for loop. So we only
-		// iterate the hidden scratchpad containers here.
-		if (!container->workspace) {
+		if (container_is_scratchpad_hidden(container)) {
 			f(container, data);
 			container_for_each_child(container, f, data);
 		}
@@ -359,7 +359,7 @@ struct sway_container *root_find_container(
 	// Scratchpad
 	for (int i = 0; i < root->scratchpad->length; ++i) {
 		struct sway_container *container = root->scratchpad->items[i];
-		if (!container->workspace) {
+		if (container_is_scratchpad_hidden(container)) {
 			if (test(container, data)) {
 				return container;
 			}
